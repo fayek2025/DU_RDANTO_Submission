@@ -12,7 +12,12 @@ COPY package*.json pnpm-lock.yaml* ./
 COPY tsconfig.json ./
 
 # Install all dependencies (including dev dependencies)
-RUN pnpm install --frozen-lockfile
+# Use frozen-lockfile if lock file exists, otherwise install normally
+RUN if [ -f pnpm-lock.yaml ]; then \
+        pnpm install --frozen-lockfile; \
+    else \
+        pnpm install; \
+    fi
 
 # Copy source code
 COPY src ./src
