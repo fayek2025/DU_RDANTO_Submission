@@ -1,0 +1,180 @@
+name: CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+    tags:
+      - 'v*.*.*'  # Triggers on version tags like v1.0.0
+  workflow_run:
+    workflows: ["CI Pipeline"]
+    types:
+      - completed
+    branches: [ main ]
+
+env:
+  REGISTRY: ghcr.io  # GitHub Container Registry (change to docker.io for Docker Hub)
+  IMAGE_PREFIX: ${{ github.repository_owner }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'success' || github.event_name == 'push'
+    permissions:
+      contents: read
+      packages: write
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Extract metadata for backend
+      id: meta-backend
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/ecommerce-backend
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+    
+    - name: Extract metadata for gateway
+      id: meta-gateway
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/ecommerce-gateway
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+    
+    - name: Build and push backend image
+      uses: docker/build-push-action@v5
+      with:
+        context: ./backend
+        file: ./backend/Dockerfile
+        push: true
+        tags: ${{ steps.meta-backend.outputs.tags }}
+        labels: ${{ steps.meta-backend.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+    
+    - name: Build and push gateway image
+      uses: docker/build-push-action@v5
+      with:
+        context: ./gateway
+        file: ./gateway/Dockerfile
+        push: true
+        tags: ${{ steps.meta-gateway.outputs.tags }}
+        labels: ${{ steps.meta-gateway.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && (github.event.workflow_run.conclusion == 'success' || github.event_name == 'push')
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up SSH
+      uses: webfactory/ssh-agent@v0.9.0
+      with:
+        ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+    
+    - name: Add server to known hosts
+      run: |
+        ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
+    
+    - name: Create production .env file
+      run: |
+        cat > .env.prod << EOF
+        # MongoDB Configuration
+        MONGO_INITDB_ROOT_USERNAME=${{ secrets.MONGO_INITDB_ROOT_USERNAME }}
+        MONGO_INITDB_ROOT_PASSWORD=${{ secrets.MONGO_INITDB_ROOT_PASSWORD }}
+        MONGO_DATABASE=${{ secrets.MONGO_DATABASE }}
+        MONGO_URI=mongodb://${{ secrets.MONGO_INITDB_ROOT_USERNAME }}:${{ secrets.MONGO_INITDB_ROOT_PASSWORD }}@mongo:27017/${{ secrets.MONGO_DATABASE }}?authSource=admin
+        
+        # Service Ports
+        BACKEND_PORT=3847
+        GATEWAY_PORT=5921
+        
+        # Environment
+        NODE_ENV=production
+        EOF
+    
+    - name: Deploy to server
+      env:
+        DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        REGISTRY: ${{ env.REGISTRY }}
+        IMAGE_PREFIX: ${{ env.IMAGE_PREFIX }}
+      run: |
+        # Create deployment directory structure
+        ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} << 'ENDSSH'
+          set -e
+          mkdir -p ${{ secrets.DEPLOY_PATH }}/docker
+          mkdir -p ${{ secrets.DEPLOY_PATH }}/scripts
+        ENDSSH
+        
+        # Copy necessary files
+        scp docker/compose.production.yaml ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ secrets.DEPLOY_PATH }}/docker/
+        scp Makefile ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ secrets.DEPLOY_PATH }}/
+        scp .env.prod ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ secrets.DEPLOY_PATH }}/.env
+        
+        # Deploy using SSH
+        ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} << ENDSSH
+          set -e
+          cd ${{ secrets.DEPLOY_PATH }}
+          
+          # Log in to container registry
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
+          
+          # Update docker-compose to use registry images
+          sed -i 's|build:|image: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/ecommerce-|g' docker/compose.production.yaml
+          sed -i 's|context: ../backend|# context: ../backend|g' docker/compose.production.yaml
+          sed -i 's|context: ../gateway|# context: ../gateway|g' docker/compose.production.yaml
+          sed -i 's|dockerfile: Dockerfile|# dockerfile: Dockerfile|g' docker/compose.production.yaml
+          
+          # Pull latest images
+          docker compose -f docker/compose.production.yaml --env-file .env pull
+          
+          # Stop old containers
+          docker compose -f docker/compose.production.yaml --env-file .env down
+          
+          # Start new containers
+          docker compose -f docker/compose.production.yaml --env-file .env up -d
+          
+          # Clean up old images
+          docker image prune -f
+        ENDSSH
+    
+    - name: Verify deployment
+      run: |
+        sleep 30  # Wait for services to start
+        ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} << 'ENDSSH'
+          # Check if containers are running
+          docker ps | grep ecom- || exit 1
+          
+          # Check gateway health
+          curl -f http://localhost:5921/health || exit 1
+        ENDSSH
+
