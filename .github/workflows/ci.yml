@@ -1,0 +1,97 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Create .env file
+      run: |
+        cat > .env << EOF
+        # MongoDB Configuration
+        MONGO_INITDB_ROOT_USERNAME=admin
+        MONGO_INITDB_ROOT_PASSWORD=changeme
+        MONGO_DATABASE=ecommerce
+        MONGO_URI=mongodb://admin:changeme@mongo:27017/ecommerce?authSource=admin
+        
+        # Service Ports (DO NOT CHANGE)
+        BACKEND_PORT=3847
+        GATEWAY_PORT=5921
+        
+        # Environment
+        NODE_ENV=development
+        EOF
+    
+    - name: Make scripts executable
+      run: chmod +x scripts/*.sh
+    
+    - name: Build Docker images
+      run: make dev-build
+    
+    - name: Start services
+      run: make dev-up
+    
+    - name: Wait for services to be ready
+      run: |
+        echo "Waiting for services to be ready..."
+        timeout=120
+        elapsed=0
+        while [ $elapsed -lt $timeout ]; do
+          if curl -sf http://localhost:5921/health > /dev/null 2>&1; then
+            echo "Gateway is ready!"
+            break
+          fi
+          echo "Waiting for gateway... ($elapsed/$timeout seconds)"
+          sleep 5
+          elapsed=$((elapsed + 5))
+        done
+        
+        if [ $elapsed -ge $timeout ]; then
+          echo "Services failed to start within $timeout seconds"
+          echo "Gateway logs:"
+          docker logs ecom-gateway-dev || true
+          echo "Backend logs:"
+          docker logs ecom-backend-dev || true
+          echo "MongoDB logs:"
+          docker logs ecom-mongo-dev || true
+          exit 1
+        fi
+        
+        # Give services a bit more time to fully initialize
+        sleep 10
+    
+    - name: Run all tests
+      run: make test
+    
+    - name: Show service logs on failure
+      if: failure()
+      run: |
+        echo "=== Gateway Logs ==="
+        docker logs ecom-gateway-dev || true
+        echo ""
+        echo "=== Backend Logs ==="
+        docker logs ecom-backend-dev || true
+        echo ""
+        echo "=== MongoDB Logs ==="
+        docker logs ecom-mongo-dev || true
+        echo ""
+        echo "=== Container Status ==="
+        docker ps -a || true
+    
+    - name: Cleanup
+      if: always()
+      run: |
+        make dev-down ARGS="--volumes" || true
+
