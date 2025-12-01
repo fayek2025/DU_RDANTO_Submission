@@ -9,11 +9,16 @@ RUN corepack enable && corepack prepare pnpm@latest --activate
 WORKDIR /app
 
 # Copy package files
-COPY package*.json pnpm-lock.yaml* ./
+COPY package*.json ./
+COPY pnpm-lock.yaml* ./
 COPY tsconfig.json ./
 
-# Install dependencies
-RUN pnpm install --frozen-lockfile
+# Install dependencies (use frozen-lockfile if lock file exists)
+RUN if [ -f pnpm-lock.yaml ]; then \
+        pnpm install --frozen-lockfile; \
+    else \
+        pnpm install; \
+    fi
 
 # Copy source code
 COPY src ./src
@@ -35,11 +40,15 @@ RUN addgroup -g 1001 -S nodejs && \
 WORKDIR /app
 
 # Copy package files
-COPY package*.json pnpm-lock.yaml* ./
+COPY package*.json ./
+COPY pnpm-lock.yaml* ./
 
-# Install only production dependencies
-RUN pnpm install --prod --frozen-lockfile && \
-    pnpm store prune
+# Install only production dependencies (use frozen-lockfile if lock file exists)
+RUN if [ -f pnpm-lock.yaml ]; then \
+        pnpm install --prod --frozen-lockfile && pnpm store prune; \
+    else \
+        pnpm install --prod && pnpm store prune; \
+    fi
 
 # Copy built files from builder stage
 COPY --from=builder /app/dist ./dist

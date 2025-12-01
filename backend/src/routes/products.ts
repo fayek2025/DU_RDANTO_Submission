@@ -1,7 +1,7 @@
-import express, { Request, Response } from 'express';
+import express, { Request, Response, Router } from 'express';
 import { ProductModel } from '../models/product';
 
-const router = express.Router();
+const router: Router = express.Router();
 
 // Create a product
 // This endpoint should use PUT instead of POST for idempotency
