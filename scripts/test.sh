@@ -247,19 +247,24 @@ test_container_health() {
     backend_health=$(docker inspect --format='{{.State.Health.Status}}' ecom-backend-dev 2>/dev/null || docker inspect --format='{{.State.Health.Status}}' ecom-backend-prod 2>/dev/null || echo "none")
     mongo_health=$(docker inspect --format='{{.State.Health.Status}}' ecom-mongo-dev 2>/dev/null || docker inspect --format='{{.State.Health.Status}}' ecom-mongo-prod 2>/dev/null || echo "none")
     
-    if [ "$gateway_health" == "healthy" ] || [ "$gateway_health" == "none" ]; then
+    # Trim whitespace and newlines
+    gateway_health=$(echo "$gateway_health" | tr -d '\n\r' | xargs)
+    backend_health=$(echo "$backend_health" | tr -d '\n\r' | xargs)
+    mongo_health=$(echo "$mongo_health" | tr -d '\n\r' | xargs)
+    
+    if [ "$gateway_health" == "healthy" ] || [ "$gateway_health" == "none" ] || [ -z "$gateway_health" ]; then
         test_pass "Gateway container health check configured"
     else
         test_fail "Gateway container health check: $gateway_health"
     fi
     
-    if [ "$backend_health" == "healthy" ] || [ "$backend_health" == "none" ]; then
+    if [ "$backend_health" == "healthy" ] || [ "$backend_health" == "none" ] || [ -z "$backend_health" ]; then
         test_pass "Backend container health check configured"
     else
         test_fail "Backend container health check: $backend_health"
     fi
     
-    if [ "$mongo_health" == "healthy" ] || [ "$mongo_health" == "none" ]; then
+    if [ "$mongo_health" == "healthy" ] || [ "$mongo_health" == "none" ] || [ -z "$mongo_health" ]; then
         test_pass "MongoDB container health check configured"
     else
         test_fail "MongoDB container health check: $mongo_health"

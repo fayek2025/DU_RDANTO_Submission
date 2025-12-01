@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   mongo:
     image: mongo:7.0
@@ -117,6 +115,3 @@ volumes:
 networks:
   ecom-network:
     driver: bridge
-    ipam:
-      config:
-        - subnet: 172.20.0.0/16
